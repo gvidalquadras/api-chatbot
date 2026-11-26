@@ -8,7 +8,9 @@ class PrestamoEntrada(BaseModel):
 
     # extra="forbid": si llega un campo que no está aquí (por ejemplo, uno que se ha
     # inventado el LLM), Pydantic da error en vez de ignorarlo.
-    model_config = ConfigDict(extra="forbid")
+    # allow_inf_nan=False: json.loads acepta Infinity, que cumple gt=0 pero hace fallar
+    # a scikit-learn con un 500.
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     # Las descripciones pasan al JSON Schema de la tool, así que el LLM también las lee.
     # edad va antes que antiguedad_laboral_anios porque el validador de abajo la necesita.

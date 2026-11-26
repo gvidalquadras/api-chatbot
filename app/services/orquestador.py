@@ -45,7 +45,7 @@ def definir_tool():
 
 
 def _resumir_errores(error):
-    """Pasa un ValidationError a una línea por campo, que el LLM entiende mejor que el texto completo."""
+    """Resume un ValidationError en "campo: mensaje" separados por punto y coma, más corto que el texto de Pydantic."""
     partes = []
     for detalle in error.errors():
         campo = ".".join(str(trozo) for trozo in detalle["loc"])
@@ -56,8 +56,9 @@ def _resumir_errores(error):
 def ejecutar_tool(nombre, argumentos_json):
     """Valida los argumentos y llama al modelo.
 
-    Nunca lanza excepciones. Si algo falla devuelve {"ok": False, "error": ...} para que
-    el LLM lea el error y pueda corregir la llamada o pedirle el dato al usuario.
+    Si la tool no existe, el JSON está roto o los datos no pasan la validación, devuelve
+    {"ok": False, "error": ...} en vez de lanzar una excepción. Así el LLM lee el error y
+    puede corregir la llamada o pedirle el dato al usuario.
     """
     if nombre != NOMBRE_TOOL:
         return {"ok": False, "error": f"la herramienta '{nombre}' no existe"}
