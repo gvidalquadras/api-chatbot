@@ -27,7 +27,98 @@ def leer_argumentos(texto):
     return {}
 
 
-# TODO: definir_tool() -> dict con la definicion de la tool, sacando "parameters" de PrestamoEntrada
-# TODO: ejecutar_tool(nombre, argumentos_json) -> dict con "ok" True/False
-#       (tool desconocida, JSON roto, datos invalidos o campos inventados -> ok False con el error)
-# TODO: responder(mensajes, llm) -> ChatSalida, con el bucle LLM -> tool -> LLM (maximo MAX_VUELTAS)
+def definir_tool():
+    """Definición de la tool en el formato de OpenAI, que es el que entiende LiteLLM."""
+    return {
+        "type": "function",
+        "function": {
+            "name": NOMBRE_TOOL,
+            "description": (
+                "Calcula la probabilidad de impago de una solicitud de préstamo y devuelve "
+                "la decisión (aprobar, revisar o rechazar). Necesita los seis datos."
+            ),
+            # Los parámetros salen del propio esquema de Pydantic. Si se cambia un campo o
+            # un rango en PrestamoEntrada, el LLM recibe la definición ya actualizada.
+            "parameters": PrestamoEntrada.model_json_schema(),
+        },
+    }
+
+
+def _resumir_errores(error):
+    """Pasa un ValidationError a una línea por campo, que el LLM entiende mejor que el texto completo."""
+    partes = []
+    for detalle in error.errors():
+        campo = ".".join(str(trozo) for trozo in detalle["loc"])
+        partes.append(f"{campo}: {detalle['msg']}")
+    return "; ".join(partes)
+
+
+def ejecutar_tool(nombre, argumentos_json):
+    """Valida los argumentos y llama al modelo.
+
+    Nunca lanza excepciones. Si algo falla devuelve {"ok": False, "error": ...} para que
+    el LLM lea el error y pueda corregir la llamada o pedirle el dato al usuario.
+    """
+    if nombre != NOMBRE_TOOL:
+        return {"ok": False, "error": f"la herramienta '{nombre}' no existe"}
+
+    argumentos = leer_argumentos(argumentos_json)
+    if not argumentos:
+        return {"ok": False, "error": "los argumentos no son un objeto JSON con datos"}
+
+    try:
+        entrada = PrestamoEntrada(**argumentos)
+    except ValidationError as error:
+        return {"ok": False, "error": _resumir_errores(error)}
+
+    salida = predecir(entrada)
+    return {"ok": True, **salida.model_dump()}
+
+
+def responder(mensajes, llm):
+    """Bucle de conversación: LLM -> tool -> LLM, hasta que el LLM conteste con texto.
+
+    Se corta a las MAX_VUELTAS llamadas al LLM para que un LLM que repite una llamada
+    errónea no deje la petición colgada.
+    """
+    historial = [{"role": "system", "content": SISTEMA}]
+    for mensaje in mensajes:
+        historial.append(mensaje.model_dump())
+
+    herramientas = [definir_tool()]
+    # Última tool ejecutada. Es la que se devuelve al frontend para que muestre los
+    # argumentos y el resultado.
+    herramienta_usada = None
+
+    for _ in range(MAX_VUELTAS):
+        respuesta = llm.completar(historial, herramientas)
+        llamadas = respuesta.get("tool_calls")
+
+        if not llamadas:
+            texto = respuesta.get("content") or "No tengo respuesta para eso."
+            return ChatSalida(respuesta=texto, herramienta=herramienta_usada)
+
+        # El mensaje del asistente con las tool_calls tiene que ir en el historial antes
+        # de los mensajes "tool"; si no, la API del LLM rechaza la conversación.
+        historial.append(respuesta)
+        for llamada in llamadas:
+            nombre = llamada["function"]["name"]
+            argumentos_json = llamada["function"]["arguments"]
+            resultado = ejecutar_tool(nombre, argumentos_json)
+            historial.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": llamada["id"],
+                    "content": json.dumps(resultado),
+                }
+            )
+            herramienta_usada = HerramientaUsada(
+                nombre=nombre,
+                argumentos=leer_argumentos(argumentos_json),
+                resultado=resultado,
+            )
+
+    return ChatSalida(
+        respuesta="No he podido completar el cálculo. Revisa los datos de la solicitud e inténtalo de nuevo.",
+        herramienta=herramienta_usada,
+    )
